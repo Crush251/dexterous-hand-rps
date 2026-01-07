@@ -14,15 +14,12 @@ python -m http.server 8080
 
 ### 2. 构建可执行文件
 
-#### Linux/macOS
+#### Linux
 
 ```bash
-# 构建所有平台的可执行文件
-go build -ldflags="-s -w" -o dist/HandGame-linux-amd64 server.go
-
 
 # 或者只构建当前平台
-go build -o dexterous-hand-rps server.go
+go build  -ldflags="-s -w" -o dexterous-hand-rps server.go
 
 # 运行
 ./dexterous-hand-rps
@@ -55,26 +52,6 @@ go build -o dexterous-hand-rps server.go
 - 必胜模式: http://localhost:8080/5.always-win/
 - 游戏模式: http://localhost:8080/6.gameplay/
 
-## 技术细节
-
-### Go embed 功能
-
-使用 Go 1.16+ 的 embed 功能，将所有静态文件嵌入到二进制文件中：
-
-```go
-//go:embed 1.detect-hand-shape 2.detect-hand-rps 3.output-event 4.follow-me 5.always-win 6.gameplay index.html
-var content embed.FS
-```
-
-### MIME 类型支持
-
-自动处理以下文件类型：
-- `.js` - JavaScript 文件
-- `.wasm` - WebAssembly 文件
-- `.tflite` - TensorFlow Lite 模型
-- `.binarypb` - Protocol Buffer 二进制文件
-- `.css` - 样式表
-- `.html` - HTML 文件
 
 ### 编译优化
 
