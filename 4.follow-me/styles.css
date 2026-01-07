@@ -93,12 +93,40 @@
     font-size: 12px;
     opacity: 0.7;
     margin-top: 2px;
-}body {
+}
+
+body {
     font-family: 'Arial', sans-serif;
     margin: 0;
     padding: 20px;
     text-align: center;
     background-color: #f5f5f5;
+}
+
+/* 返回主页链接样式 */
+.back-to-home {
+    text-align: left;
+    margin-bottom: 20px;
+}
+
+.back-link {
+    display: inline-flex;
+    align-items: center;
+    padding: 8px 16px;
+    background: white;
+    color: #667eea;
+    text-decoration: none;
+    border-radius: 20px;
+    font-weight: 500;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    transition: all 0.3s ease;
+}
+
+.back-link:hover {
+    background: #667eea;
+    color: white;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.2);
 }
 
 .container {

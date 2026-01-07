@@ -1,56 +1,229 @@
-// 剪刀石头布的姿势定义
+// 剪刀石头布的姿势定义（按不同手型号分类）
 const GesturePresets = {
-    ROCK: {
-        finger: [49, 32, 40, 36, 41, 46],
-        palm: [255, 235, 128, 128]
+    // L10 蜗轮蜗杆型号
+    'L10_worm_gear': {
+        ROCK: {
+            finger: [1,49, 128, 40, 36, 41, 46],
+            palm: [4,128, 128, 128, 128]
+        },
+        PAPER: {
+            finger: [1,255, 255, 255, 255, 255, 255],
+            palm: [4,128, 128, 128, 128]
+        },
+        SCISSORS: {
+            finger: [1,0, 103, 255, 255, 0, 0],
+            palm: [4,255, 128, 128, 128]
+        }
     },
-    PAPER: {
-        finger: [255, 255, 255, 255, 255, 255],
-        palm: [128, 128, 128, 128]
+    // L10 球关节型号
+    'L10_ball_joint': {
+        ROCK: {
+            finger: [1,49, 128, 40, 36, 41, 46],
+            palm: [4,128, 128, 128, 128]
+        },
+        PAPER: {
+            finger: [1,255, 255, 255, 255, 255, 255],
+            palm: [4,128, 128, 128, 128]
+        },
+        SCISSORS: {
+            finger: [1,0, 103, 255, 255, 0, 0],
+            palm: [4,255, 128, 128, 128]
+        }
     },
-    SCISSORS: {
-        finger: [0, 103, 255, 255, 0, 0],
-        palm: [255, 235, 128, 128]
+    // O6/L6 型号
+    'O6/L6': {
+        ROCK: {
+            finger: [1,65, 170, 25, 25, 25, 25]
+        },
+        PAPER: {
+            finger: [1,255, 255, 255, 255, 255, 255]
+          
+        },
+        SCISSORS: {
+            finger: [1,65,180,255,255,25,25]
+        }
     }
 };
 
-// 网络请求抽象
-async function sendPose(endpoint, pose) {
-    try {
-        const response = await fetch(`http://localhost:9099${endpoint}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pose })
-        });
+function parseBaseUrl(url) {
+    const urlObj = new URL(url);
+    return urlObj.searchParams.get('baseurl');
+}
 
+// 获取设备配置信息（页面加载时调用一次）
+async function loadDeviceConfig() {
+    try {
+        const response = await fetch(`${baseHost}/api/hand/handsconfig`, {
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' },
+        });
+        
         const data = await response.json();
-        if (data.status === 'success') {
-            console.log(`${endpoint} 发送成功`, pose);
+        
+        if (data.status === 'ok' && data.data && data.data.length > 0) {
+            // 保存所有设备配置信息（数组）
+            deviceConfig = data.data.map(config => {
+                // 处理 model 字段，可能是 "O6/L6" 这样的格式
+                let model = config.model || 'unknown';
+                // 保持原始格式，不拆分
+                
+                return {
+                    interface: config.interface || 'can0',
+                    model: model, // L10 / L6 / O6 / O7 / O6/L6
+                    variant: config.variant || '', // 仅 L10 有此字段：worm_gear 或 ball_joint
+                    side: config.side || 'right' // left / right
+                };
+            });
+            
+            console.log('设备配置加载成功，共', deviceConfig.length, '个设备:', deviceConfig);
+            
+            // 输出每个设备的信息
+            deviceConfig.forEach((config, index) => {
+                if (config.model === 'L10') {
+                    console.log(`设备 ${index + 1}: L10 型号，变体: ${config.variant || '未指定'}, 接口: ${config.interface}, 手: ${config.side}`);
+                } else {
+                    console.log(`设备 ${index + 1}: ${config.model} 型号, 接口: ${config.interface}, 手: ${config.side}`);
+                }
+            });
+            
+            return deviceConfig;
         } else {
-            console.error(`${endpoint} 发送失败`, data.error);
+            console.error('获取设备配置失败:', data.message || data.error);
+            return null;
         }
     } catch (error) {
-        console.error(`${endpoint} 请求错误`, error);
+        console.error('加载设备配置时发生错误:', error);
+        return null;
     }
 }
 
+// 发送 CAN 消息到指定端口
+async function sendCanMessage(canMessage) {
+    const canServerUrl = "http://localhost:5260/api/can";
+    
+    try {
+        const response = await fetch(canServerUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(canMessage)
+        });
 
-// 封装调用函数
+        const data = await response.json();
+        if (data.status === 'success' || response.ok) {
+            console.log(`CAN 消息发送成功:`, canMessage);
+            return true;
+        } else {
+            console.error(`CAN 消息发送失败:`, data.error || data.message);
+            return false;
+        }
+    } catch (error) {
+        console.error(`CAN 消息请求错误:`, error);
+        return false;
+    }
+}
+
+// 根据设备配置获取对应的手势预设键
+function getGesturePresetKey(config) {
+    if (!config) {
+        console.warn('设备配置为空，使用默认配置');
+        return 'O6/L6'; // 默认使用 O6/L6
+    }
+    
+    const { model, variant } = config;
+    
+    // L10 型号根据 variant 区分
+    if (model === 'L10') {
+        if (variant === 'worm_gear') {
+            return 'L10_worm_gear';
+        } else if (variant === 'ball_joint') {
+            return 'L10_ball_joint';
+        } else {
+            // L10 但没有指定 variant，默认使用 worm_gear
+            console.warn('L10 型号未指定 variant，默认使用 worm_gear');
+            return 'L10_worm_gear';
+        }
+    }
+    // O6/L6 型号
+    else if (model === 'O6/L6' || model === 'O6' || model === 'L6') {
+        return 'O6/L6';
+    }
+    // 其他未知型号，默认使用 O6/L6
+    else {
+        console.warn(`未知型号 ${model}，使用默认配置 O6/L6`);
+        return 'O6/L6';
+    }
+}
+
+// 根据左右手获取 CAN ID
+function getCanId(side) {
+    // 左手为 0x28，右手为 0x27
+    return side === 'left' ? 0x28 : 0x27;
+}
+
+// 封装调用函数 - 并发发送所有设备的 CAN 消息
 async function performGesture(gesture) {
-    const preset = GesturePresets[gesture];
-
-    if (!preset) {
-        console.error('无效的手势:', gesture);
+    // 检查设备配置是否已加载
+    if (!deviceConfig || !Array.isArray(deviceConfig) || deviceConfig.length === 0) {
+        console.error('设备配置未加载或为空，无法执行手势');
         return;
     }
-
-    // 发送掌部姿势
-    await sendPose('/api/palm', preset.palm);
-
-    // 稍微延迟后发送手指姿势
-    setTimeout(async () => {
-        await sendPose('/api/fingers', preset.finger);
-    }, 30);
+    
+    console.log(`开始执行手势 ${gesture}，共 ${deviceConfig.length} 个设备（并发发送）`);
+    
+    // 为每个设备创建发送任务，并发执行
+    const sendTasks = deviceConfig.map(async (config, index) => {
+        try {
+            // 获取对应型号的手势预设键
+            const presetKey = getGesturePresetKey(config);
+            const modelPresets = GesturePresets[presetKey];
+            
+            if (!modelPresets) {
+                console.error(`设备 ${index + 1} (${config.interface}): 未找到对应型号的手势预设:`, presetKey);
+                return;
+            }
+            
+            // 获取具体的手势预设（ROCK、PAPER 或 SCISSORS）
+            const preset = modelPresets[gesture];
+            
+            if (!preset) {
+                console.error(`设备 ${index + 1} (${config.interface}): 无效的手势:`, gesture);
+                return;
+            }
+            
+            const fingerpose = preset.finger;
+            
+            // 构建 finger CAN 消息
+            const fingerCanMessage = {
+                interface: config.interface,
+                id: getCanId(config.side),
+                data: fingerpose
+            };
+            
+            console.log(`设备 ${index + 1} (${config.interface}, ${config.side}手): 使用 ${presetKey} 配置执行手势 ${gesture}`);
+            
+            // 发送 finger 消息
+            await sendCanMessage(fingerCanMessage);
+            
+            // 如果有 palm 数据，延迟后发送
+            if (preset.palm) {
+                const palmCanMessage = {
+                    interface: config.interface,
+                    id: getCanId(config.side),
+                    data: preset.palm
+                };
+                // 短暂延迟后发送手掌姿势
+                await new Promise(resolve => setTimeout(resolve, 10));
+                await sendCanMessage(palmCanMessage);
+            }
+        } catch (error) {
+            console.error(`设备 ${index + 1} (${config.interface}): 发送失败`, error);
+        }
+    });
+    
+    // 并发执行所有设备的发送任务
+    await Promise.all(sendTasks);
+    
+    console.log(`手势 ${gesture} 执行完成（所有设备并发发送完成）`);
 }
 
 // 处理手势变化，使用防抖动技术确保手势稳定
@@ -62,7 +235,7 @@ function handleGestureChange(newGesture, confidence) {
             clearTimeout(gestureChangeTimeout);
         }
         
-        // 设置新的定时器 - 手势必须保持稳定500毫秒才会触发事件
+        // 设置新的定时器 - 手势必须保持稳定100毫秒才会触发事件
         gestureChangeTimeout = setTimeout(() => {
             // 更新最后检测到的手势
             lastDetectedGesture = newGesture;
@@ -70,7 +243,7 @@ function handleGestureChange(newGesture, confidence) {
             // 播放音效 (可选)
             playGestureSound(newGesture);
             
-        }, 100); // 500毫秒的防抖动延迟
+        }, 200); // 500毫秒的防抖动延迟
     }
     
     // 如果手势变为"未识别"，重置最后检测到的手势
@@ -147,6 +320,8 @@ let currentGesture = "未识别";
 let gestureConfidence = 0;
 let lastDetectedGesture = ""; // 用于记录上一次检测到的手势
 let gestureChangeTimeout = null; // 用于防抖动的超时变量
+let deviceConfig = null; // 存储设备配置信息
+let baseHost = "http://localhost:1217";
 
 // 定义手部连接关系 (MediaPipe Hands模型的21个关键点连接方式)
 const HAND_CONNECTIONS = [
@@ -173,13 +348,13 @@ async function initHandDetection() {
         hands = new Hands({
             locateFile: (file) => {
                 return `libs/mediapipe/hands/${file}`;
-                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                //return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
             }
         });
 
         // 配置模型
         await hands.setOptions({
-            maxNumHands: 2,              // 最多检测2只手
+            maxNumHands: 1,              // 最多检测2只手
             modelComplexity: 1,          // 模型复杂度 (0, 1)
             minDetectionConfidence: 0.5, // 最小检测置信度
             minTrackingConfidence: 0.5   // 最小跟踪置信度
@@ -578,7 +753,11 @@ startButton.addEventListener('click', startCamera);
 stopButton.addEventListener('click', stopDetection);
 
 // 页面加载完成后初始化
-window.addEventListener('load', () => {
+window.addEventListener('load', async () => {
+    // 首先加载设备配置信息（只加载一次）
+    await loadDeviceConfig();
+    
+    // 然后初始化手部检测模型
     initHandDetection();
     
     // 添加手势事件监听器
