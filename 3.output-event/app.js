@@ -1,7 +1,7 @@
 // 处理手势变化，使用防抖动技术确保手势稳定
 function handleGestureChange(newGesture, confidence) {
     // 只有在手势变化且置信度足够高时才处理
-    if (newGesture !== lastDetectedGesture && newGesture !== "未识别" && confidence >= 0.7) {
+    if (newGesture !== lastDetectedGesture && newGesture !== "未识别" && confidence >= GESTURE_ACCEPT_CONFIDENCE) {
         // 清除任何现有的定时器
         if (gestureChangeTimeout) {
             clearTimeout(gestureChangeTimeout);
@@ -85,6 +85,8 @@ const scissorsConfidence = document.getElementById('scissors-confidence');
 const rockCard = document.getElementById('rock-card');
 const paperCard = document.getElementById('paper-card');
 const scissorsCard = document.getElementById('scissors-card');
+const RPS_RECOGNIZER = window.RPSGestureRecognition;
+const GESTURE_ACCEPT_CONFIDENCE = RPS_RECOGNIZER.ACCEPTED_CONFIDENCE;
 
 // 全局变量
 let hands;
@@ -165,6 +167,8 @@ function onResults(results) {
 
     // 如果检测到手
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        let bestGesture = null;
+
         // 绘制手部关键点
         for (let i = 0; i < results.multiHandLandmarks.length; i++) {
             const landmarks = results.multiHandLandmarks[i];
@@ -197,15 +201,24 @@ function onResults(results) {
             const textY = wrist.y * canvas.height - 30;
             ctx.strokeText(gestureText, textX, textY);
             ctx.fillText(gestureText, textX, textY);
-            
-            // 更新手势置信度显示
-            updateGestureConfidence(gesture.name, gesture.confidence);
-            
-            // 如果置信度高，更新当前识别的手势
-            if (gesture.confidence > 0.7 && gesture.name !== "未识别") {
-                currentGesture = gesture.name;
-                gestureConfidence = gesture.confidence;
+
+            if (!bestGesture || gesture.confidence > bestGesture.confidence) {
+                bestGesture = gesture;
             }
+        }
+
+        if (bestGesture) {
+            updateGestureConfidence(bestGesture.name, bestGesture.confidence);
+
+            if (bestGesture.name !== "未识别" && bestGesture.confidence >= GESTURE_ACCEPT_CONFIDENCE) {
+                currentGesture = bestGesture.name;
+                gestureConfidence = bestGesture.confidence;
+            } else {
+                currentGesture = "未识别";
+                gestureConfidence = bestGesture.confidence;
+            }
+
+            handleGestureChange(bestGesture.name, bestGesture.confidence);
         }
 
         // 更新关键点信息
@@ -214,6 +227,7 @@ function onResults(results) {
         landmarksInfo.textContent = "尚未检测到手部";
         currentGesture = "等待手势...";
         gestureConfidence = 0;
+        handleGestureChange("未识别", 0);
     }
     
     // 更新屏幕上的手势显示
@@ -222,56 +236,7 @@ function onResults(results) {
 
 // 识别石头剪刀布手势
 function recognizeRockPaperScissors(landmarks) {
-    // 计算每个手指的伸展状态
-    const thumbIsOpen = isThumbOpen(landmarks);
-    const indexIsOpen = isFingerOpen(landmarks, 8, 6);
-    const middleIsOpen = isFingerOpen(landmarks, 12, 10);
-    const ringIsOpen = isFingerOpen(landmarks, 16, 14);
-    const pinkyIsOpen = isFingerOpen(landmarks, 20, 18);
-    
-    // 获取手指打开状态
-    const openFingers = [thumbIsOpen, indexIsOpen, middleIsOpen, ringIsOpen, pinkyIsOpen];
-    const openCount = openFingers.filter(Boolean).length;
-    
-    // 识别手势逻辑
-    let gesture = "未识别";
-    let confidence = 0.5; // 默认置信度
-    
-    // 石头: 所有手指都弯曲
-    if (!thumbIsOpen && !indexIsOpen && !middleIsOpen && !ringIsOpen && !pinkyIsOpen) {
-        gesture = "石头";
-        confidence = 0.9;
-    }
-    // 布: 所有手指都伸展
-    else if (openCount >= 4) {
-        gesture = "布";
-        confidence = 0.85;
-    }
-    // 剪刀: 食指和中指伸展，其他手指弯曲
-    else if (indexIsOpen && middleIsOpen && !ringIsOpen && !pinkyIsOpen) {
-        gesture = "剪刀";
-        confidence = 0.8;
-    }
-    
-    return { name: gesture, confidence: confidence };
-}
-
-// 检查拇指是否伸展
-function isThumbOpen(landmarks) {
-    const thumb_tip = landmarks[4];
-    const thumb_ip = landmarks[3];
-    
-    // 拇指特殊处理，检查拇指尖与手指关节的位置关系
-    return thumb_tip.x < thumb_ip.x; 
-}
-
-// 检查手指是否伸展 (通过比较指尖和手指关节的y坐标)
-function isFingerOpen(landmarks, tipIdx, pipIdx) {
-    const finger_tip = landmarks[tipIdx];
-    const finger_pip = landmarks[pipIdx];
-    
-    // 指尖应该高于手指关节（y坐标更小）
-    return finger_tip.y < finger_pip.y;
+    return RPS_RECOGNIZER.recognizeGesture(landmarks);
 }
 
 // 更新手势置信度显示
@@ -330,11 +295,13 @@ function updateGestureDisplay() {
     }
     
     // 更新显示
-    if (currentGesture !== "等待手势...") {
+    if (currentGesture === "等待手势...") {
+        gestureDisplay.textContent = currentGesture;
+    } else if (currentGesture === "未识别") {
+        gestureDisplay.textContent = `未识别 (${Math.round(gestureConfidence * 100)}%)`;
+    } else {
         const confidencePercent = Math.round(gestureConfidence * 100);
         gestureDisplay.textContent = `${icon} ${currentGesture} ${confidencePercent}%`;
-    } else {
-        gestureDisplay.textContent = currentGesture;
     }
 }
 
@@ -352,24 +319,11 @@ function updateLandmarksInfo(multiHandLandmarks, multiHandedness) {
         
         infoText += `手 #${i+1} (${handedness === 'Left' ? '左手' : '右手'}, 置信度: ${confidence})\n`;
         infoText += `检测到的手势: ${gesture.name} (置信度: ${gesture.confidence.toFixed(2)})\n`;
-        
-        // 处理手势变化
-        handleGestureChange(gesture.name, gesture.confidence);
-        
-        // 计算指尖位置
-        const fingertips = [
-            { name: '拇指', index: 4 },
-            { name: '食指', index: 8 },
-            { name: '中指', index: 12 },
-            { name: '无名指', index: 16 },
-            { name: '小指', index: 20 }
-        ];
-        
-        for (const finger of fingertips) {
-            const tip = landmarks[finger.index];
-            infoText += `  ${finger.name}尖: x=${Math.round(tip.x*100)/100}, y=${Math.round(tip.y*100)/100}, z=${Math.round(tip.z*100)/100}\n`;
+
+        for (const line of RPS_RECOGNIZER.getDebugLines(gesture)) {
+            infoText += `${line}\n`;
         }
-        
+
         infoText += '\n';
     }
     
@@ -444,8 +398,11 @@ function stopDetection() {
     handCountSpan.textContent = "0";
     landmarksInfo.textContent = "尚未检测到手部";
     statusDiv.textContent = "检测已停止";
+    currentGesture = "等待手势...";
+    gestureConfidence = 0;
     gestureDisplay.textContent = "等待手势...";
     resetGestureConfidence();
+    handleGestureChange("未识别", 0);
     
     startButton.disabled = false;
     stopButton.disabled = true;
