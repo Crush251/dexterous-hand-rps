@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-//go:embed 1.detect-hand-shape 2.detect-hand-rps 3.output-event 4.follow-me 5.always-win 6.gameplay index.html
+//go:embed 1.detect-hand-shape 2.detect-hand-rps 3.output-event 4.follow-me 5.always-win 6.gameplay shared index.html
 var content embed.FS
 
 // CAN 服务器配置
