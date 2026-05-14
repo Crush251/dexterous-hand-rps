@@ -15,6 +15,7 @@ const PINKY_MCP = 17, PINKY_PIP = 18, PINKY_DIP = 19, PINKY_TIP = 20;
 const JOINT_SMOOTH = [0.4, 0.4, 0.4, 0.4, 0.4, 0.2, 0.4, 0.4, 0.2, 0.4];
 
 const SEND_INTERVAL_MS = 50;
+const FOLLOW_MIN_CHANGED_VALUE = 2;
 
 function toArr(lm) {
     return [lm.x, lm.y, lm.z];
@@ -344,6 +345,63 @@ async function sendFollowBatch(devices) {
     }
 }
 
+function flattenFollowDevices(devices) {
+    return devices.flatMap((dev) => [
+        dev.model,
+        dev.interface,
+        dev.id,
+        ...dev.data.flatMap((row) => row),
+    ]);
+}
+
+function hasMeaningfulFollowChange(prev, next) {
+    if (!prev) return true;
+    const a = flattenFollowDevices(prev);
+    const b = flattenFollowDevices(next);
+    if (a.length !== b.length) return true;
+
+    for (let i = 0; i < a.length; i++) {
+        if (typeof a[i] !== 'number' || typeof b[i] !== 'number') {
+            if (a[i] !== b[i]) return true;
+            continue;
+        }
+        if (Math.abs(a[i] - b[i]) >= FOLLOW_MIN_CHANGED_VALUE) {
+            return true;
+        }
+    }
+    return false;
+}
+
+let followSendInFlight = false;
+let queuedFollowDevices = null;
+let lastSentFollowDevices = null;
+
+async function sendFollowBatchCoalesced(devices) {
+    if (!devices || devices.length === 0) return;
+    if (!hasMeaningfulFollowChange(lastSentFollowDevices, devices)) {
+        return;
+    }
+
+    if (followSendInFlight) {
+        queuedFollowDevices = devices;
+        return;
+    }
+
+    followSendInFlight = true;
+    try {
+        if (await sendFollowBatch(devices)) {
+            lastSentFollowDevices = devices;
+        }
+    } finally {
+        followSendInFlight = false;
+        if (queuedFollowDevices) {
+            const latest = queuedFollowDevices;
+            queuedFollowDevices = null;
+            sendFollowBatchCoalesced(latest);
+        }
+    }
+}
+
 // ── DOM ─────────────────────────────────────────────────────────────
 const video = document.getElementById('webcam');
 const canvas = document.getElementById('output-canvas');
@@ -548,13 +606,15 @@ function onResults(results) {
             lastFollowSend = t;
             const devices = buildFollowDevices(results.multiHandLandmarks, results.multiHandedness);
             if (devices.length > 0) {
-                sendFollowBatch(devices);
+                sendFollowBatchCoalesced(devices);
             }
         }
     } else {
         landmarksInfo.textContent = '尚未检测到手部';
         smoothedLeft = null;
         smoothedRight = null;
+        queuedFollowDevices = null;
+        lastSentFollowDevices = null;
         if (jointBarsEl) jointBarsEl.innerHTML = '';
         gestureDisplay.textContent = '等待手部…';
     }
@@ -685,6 +745,8 @@ function stopDetection() {
     gestureDisplay.textContent = '等待手部…';
     smoothedLeft = null;
     smoothedRight = null;
+    queuedFollowDevices = null;
+    lastSentFollowDevices = null;
     if (jointBarsEl) jointBarsEl.innerHTML = '';
 
     stopButton.disabled = true;
