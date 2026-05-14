@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"mime"
@@ -21,10 +22,12 @@ var content embed.FS
 
 // CAN 服务器配置
 const canServerURL = "http://localhost:5260/api/can"
+const maxCanHTTPConcurrency = 16
 
 // HTTP 客户端（复用连接）
 var httpClient *http.Client
 var httpClientOnce sync.Once
+var canHTTPSemaphore = make(chan struct{}, maxCanHTTPConcurrency)
 
 // 型号过滤配置（命令行参数）
 var modelFilter string
@@ -41,15 +44,16 @@ func getHTTPClient() *http.Client {
 	httpClientOnce.Do(func() {
 		// 配置连接池参数，复用 HTTP 连接
 		transport := &http.Transport{
-			MaxIdleConns:        100,              // 最大空闲连接数
-			MaxIdleConnsPerHost: 10,               // 每个主机最大空闲连接数
+			MaxIdleConns:        200,              // 最大空闲连接数
+			MaxIdleConnsPerHost: 64,               // 每个主机最大空闲连接数
+			MaxConnsPerHost:     64,               // 限制同一主机总连接，避免洪峰耗尽资源
 			IdleConnTimeout:     90 * time.Second, // 空闲连接超时时间
 			DisableKeepAlives:   false,            // 启用连接复用
 		}
 
 		httpClient = &http.Client{
 			Transport: transport,
-			Timeout:   10 * time.Second, // 请求超时时间
+			Timeout:   3 * time.Second, // 请求超时时间，避免堆积时恢复过慢
 		}
 	})
 	return httpClient
@@ -108,9 +112,9 @@ type BatchCanResponse struct {
 
 // FollowDeviceEntry 跟随模式单设备载荷（每接口独立 CAN，支持左右手不同数据）
 type FollowDeviceEntry struct {
-	Model     string `json:"model"`
-	Interface string `json:"interface"`
-	ID        int    `json:"id"`
+	Model     string  `json:"model"`
+	Interface string  `json:"interface"`
+	ID        int     `json:"id"`
 	Data      [][]int `json:"data"`
 }
 
@@ -353,28 +357,30 @@ func handleFollowBatch(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		for di, row := range dev.Data {
-			if len(row) == 0 {
+		wg.Add(1)
+		go func(dev FollowDeviceEntry) {
+			defer wg.Done()
+			// 同一设备的多行 CAN 必须保持顺序，避免 finger/palm 帧被乱序下发。
+			for di, row := range dev.Data {
+				if len(row) == 0 {
+					mu.Lock()
+					failedCount++
+					errs = append(errs, fmt.Sprintf("%s data[%d] 为空", dev.Model, di))
+					mu.Unlock()
+					continue
+				}
+
+				ok := sendCanMessage(CanMessage{Interface: dev.Interface, ID: dev.ID, Data: row})
 				mu.Lock()
-				failedCount++
-				errs = append(errs, fmt.Sprintf("%s data[%d] 为空", dev.Model, di))
-				mu.Unlock()
-				continue
-			}
-			wg.Add(1)
-			go func(iface string, canID int, data []int, model string, idx int) {
-				defer wg.Done()
-				ok := sendCanMessage(CanMessage{Interface: iface, ID: canID, Data: data})
-				mu.Lock()
-				defer mu.Unlock()
 				if ok {
 					successCount++
 				} else {
 					failedCount++
-					errs = append(errs, fmt.Sprintf("跟随 %s %s [%d]", model, iface, idx))
+					errs = append(errs, fmt.Sprintf("跟随 %s %s [%d]", dev.Model, dev.Interface, di))
 				}
-			}(dev.Interface, dev.ID, row, dev.Model, di)
-		}
+				mu.Unlock()
+			}
+		}(dev)
 	}
 
 	wg.Wait()
@@ -480,7 +486,7 @@ func processL25WithQueue(
 	if len(config.ID) > 0 && len(config.ID) != len(config.Interface) {
 		globalMu.Lock()
 		*failedCount++
-		*errors = append(*errors, fmt.Sprintf("型号 L25: ID数量与接口数量不匹配"))
+		*errors = append(*errors, "型号 L25: ID数量与接口数量不匹配")
 		globalMu.Unlock()
 		return
 	}
@@ -543,12 +549,13 @@ func executeModelConfig(
 	modelSuccess := 0
 	modelFailed := 0
 
-	for dataIndex, dataArray := range config.Data {
-		for i, iface := range config.Interface {
-			modelWg.Add(1)
-			go func(interfaceName string, canID int, data []int, dataIdx int) {
-				defer modelWg.Done()
-				canMsg := CanMessage{Interface: interfaceName, ID: canID, Data: data}
+	for i, iface := range config.Interface {
+		modelWg.Add(1)
+		go func(interfaceName string, canID int) {
+			defer modelWg.Done()
+			// 同一接口内按 data 顺序发送，避免多帧动作被并发乱序。
+			for dataIndex, dataArray := range config.Data {
+				canMsg := CanMessage{Interface: interfaceName, ID: canID, Data: dataArray}
 				if sendCanMessage(canMsg) {
 					modelMu.Lock()
 					modelSuccess++
@@ -558,11 +565,11 @@ func executeModelConfig(
 					modelFailed++
 					modelMu.Unlock()
 					globalMu.Lock()
-					*errors = append(*errors, fmt.Sprintf("型号 %s, 接口 %s, 数据[%d]: 发送失败", model, interfaceName, dataIdx))
+					*errors = append(*errors, fmt.Sprintf("型号 %s, 接口 %s, 数据[%d]: 发送失败", model, interfaceName, dataIndex))
 					globalMu.Unlock()
 				}
-			}(iface, getCanID(config.ID, i), dataArray, dataIndex)
-		}
+			}
+		}(iface, getCanID(config.ID, i))
 	}
 
 	modelWg.Wait()
@@ -590,12 +597,18 @@ func sendCanMessage(msg CanMessage) bool {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	canHTTPSemaphore <- struct{}{}
+	defer func() { <-canHTTPSemaphore }()
+
 	// 发送请求（复用连接）
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	// 检查响应
 	if resp.StatusCode == http.StatusOK {

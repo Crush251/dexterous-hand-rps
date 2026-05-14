@@ -249,7 +249,9 @@ async function performGesture(gesture) {
                 }
             }
             
-            console.log(`设备 ${index + 1} (${config.interface}, ${config.side}手): 使用 ${presetKey} 配置执行手势 ${gesture}`);
+            if (DEBUG_CAN_LOG) {
+                console.log(`设备 ${index + 1} (${config.interface}, ${config.side}手): 使用 ${presetKey} 配置执行手势 ${gesture}`);
+            }
         } catch (error) {
             console.error(`设备 ${index + 1} (${config.interface}): 准备消息失败`, error);
         }
@@ -265,34 +267,88 @@ async function performGesture(gesture) {
     }
 }
 
+function getCounterGesture(gesture) {
+    switch (gesture) {
+        case "石头":
+            return "PAPER";
+        case "布":
+            return "SCISSORS";
+        case "剪刀":
+            return "ROCK";
+        default:
+            return null;
+    }
+}
+
+async function sendCounterGesture(gesture) {
+    const counterGesture = getCounterGesture(gesture);
+    if (!counterGesture) {
+        return;
+    }
+
+    // 后端还没响应时，不叠加请求；只保留最新动作，避免请求风暴。
+    if (gestureSendInFlight) {
+        queuedCounterGesture = counterGesture;
+        return;
+    }
+
+    gestureSendInFlight = true;
+    try {
+        await performGesture(counterGesture);
+    } finally {
+        gestureSendInFlight = false;
+        if (queuedCounterGesture && queuedCounterGesture !== counterGesture) {
+            const nextGesture = queuedCounterGesture;
+            queuedCounterGesture = null;
+            gestureSendInFlight = true;
+            try {
+                await performGesture(nextGesture);
+            } finally {
+                gestureSendInFlight = false;
+            }
+        } else {
+            queuedCounterGesture = null;
+        }
+    }
+}
+
+function resetGestureTriggerState() {
+    lastDetectedGesture = "";
+    pendingGesture = "";
+    queuedCounterGesture = null;
+    if (gestureChangeTimeout) {
+        clearTimeout(gestureChangeTimeout);
+        gestureChangeTimeout = null;
+    }
+}
+
 // 处理手势变化，使用防抖动技术确保手势稳定
 function handleGestureChange(newGesture, confidence) {
-    // 只有在手势变化且置信度足够高时才处理
-    if (newGesture !== lastDetectedGesture && newGesture !== "未识别" && confidence >= 0.7) {
-        // 清除任何现有的定时器
-        if (gestureChangeTimeout) {
-            clearTimeout(gestureChangeTimeout);
-        }
-        
-        // 设置新的定时器 - 手势必须保持稳定100毫秒才会触发事件
-        gestureChangeTimeout = setTimeout(() => {
-            // 更新最后检测到的手势
-            lastDetectedGesture = newGesture;
+    const isValidGesture = newGesture !== "未识别" && confidence >= 0.7;
 
-            // 播放音效 (可选)
-            playGestureSound(newGesture);
-            
-        }, 500); // 500毫秒的防抖动延迟
+    if (!isValidGesture) {
+        resetGestureTriggerState();
+        return;
     }
-    
-    // 如果手势变为"未识别"，重置最后检测到的手势
-    if (newGesture === "未识别") {
-        lastDetectedGesture = "";
-        if (gestureChangeTimeout) {
-            clearTimeout(gestureChangeTimeout);
-            gestureChangeTimeout = null;
-        }
+
+    if (newGesture === lastDetectedGesture || newGesture === pendingGesture) {
+        return;
     }
+
+    if (gestureChangeTimeout) {
+        clearTimeout(gestureChangeTimeout);
+    }
+
+    pendingGesture = newGesture;
+    // 手势稳定一段时间后才触发，且同一稳定手势只下发一次。
+    gestureChangeTimeout = setTimeout(() => {
+        lastDetectedGesture = newGesture;
+        pendingGesture = "";
+        gestureChangeTimeout = null;
+
+        playGestureSound(newGesture);
+        sendCounterGesture(newGesture);
+    }, GESTURE_STABLE_DELAY_MS);
 }
 
 // 播放手势音效 (可选功能)
@@ -361,11 +417,16 @@ let lastFrameTime = 0;
 let isRunning = false;
 let currentGesture = "未识别";
 let gestureConfidence = 0;
-let lastDetectedGesture = ""; // 用于记录上一次检测到的手势
+let lastDetectedGesture = ""; // 用于记录上一次稳定触发的手势
+let pendingGesture = ""; // 等待稳定确认的候选手势
 let gestureChangeTimeout = null; // 用于防抖动的超时变量
+let gestureSendInFlight = false; // 避免同一时刻叠加多个机械手请求
+let queuedCounterGesture = null; // 请求进行中时只保留最新的待发送动作
 let deviceConfig = null; // 存储设备配置信息
 let baseHost = "http://localhost:7080";
 let batchHost = "http://localhost:8899";
+const GESTURE_STABLE_DELAY_MS = 300;
+const DEBUG_CAN_LOG = false;
 
 // 定义手部连接关系 (MediaPipe Hands模型的21个关键点连接方式)
 const HAND_CONNECTIONS = [
@@ -490,6 +551,7 @@ function onResults(results) {
         landmarksInfo.textContent = "尚未检测到手部";
         currentGesture = "等待手势...";
         gestureConfidence = 0;
+        resetGestureTriggerState();
     }
     
     // 更新屏幕上的手势显示
@@ -551,10 +613,6 @@ function isFingerOpen(landmarks, tipIdx, pipIdx) {
 }
 
 
-    
-var gestureCaches = {};
-var bounceHandler = null;
-
 // 更新手势置信度显示
 function updateGestureConfidence(gesture, confidence) {
     const confidencePercent = Math.round(confidence * 100);
@@ -577,30 +635,6 @@ function updateGestureConfidence(gesture, confidence) {
             // 未识别，不更新
             break;
     }
-
-    bounceHandler = setTimeout(() => {
-        clearInterval(bounceHandler);
-
-        if (confidencePercent > 70) {
-            switch(gesture) {
-                case "石头":
-                    performGesture('PAPER');   // 出布
-                    break;
-                case "布":
-                    performGesture('SCISSORS'); // 出剪刀
-                    break;
-                case "剪刀":
-                    performGesture('ROCK');    // 出拳
-                    break;
-                default:
-                    // 未识别，不更新
-                    break;
-            }
-        }
-    
-    },30)
-
-
 }
 
 // 重置手势置信度显示
@@ -786,6 +820,7 @@ function stopDetection() {
     statusDiv.textContent = "检测已停止";
     gestureDisplay.textContent = "等待手势...";
     resetGestureConfidence();
+    resetGestureTriggerState();
 
     stopButton.disabled = true;
     if (cameraSelect) {
