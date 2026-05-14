@@ -427,6 +427,13 @@ let baseHost = "http://localhost:7080";
 let batchHost = "http://localhost:8899";
 const GESTURE_STABLE_DELAY_MS = 300;
 const DEBUG_CAN_LOG = false;
+const FPS_UPDATE_INTERVAL_MS = 250;
+const LANDMARKS_UPDATE_INTERVAL_MS = 200;
+
+let lastFpsUpdate = 0;
+let lastLandmarksInfoUpdate = 0;
+let lastHandCountText = "";
+let lastGestureDisplayText = "";
 
 // 定义手部连接关系 (MediaPipe Hands模型的21个关键点连接方式)
 const HAND_CONNECTIONS = [
@@ -438,6 +445,21 @@ const HAND_CONNECTIONS = [
     [5, 9], [9, 13], [13, 17],  // 掌心连接
     [0, 5], [0, 17]  // 手腕连接
 ];
+
+function setTextIfChanged(element, text) {
+    if (element && element.textContent !== text) {
+        element.textContent = text;
+    }
+}
+
+function setCardActive(card, active) {
+    if (!card) return;
+    if (active && !card.classList.contains('active')) {
+        card.classList.add('active');
+    } else if (!active && card.classList.contains('active')) {
+        card.classList.remove('active');
+    }
+}
 
 // 设置canvas大小
 function setupCanvas() {
@@ -487,18 +509,20 @@ function onResults(results) {
     const now = performance.now();
     const elapsed = now - lastFrameTime;
     lastFrameTime = now;
-    const fps = Math.round(1000 / elapsed);
-    fpsCounter.textContent = `FPS: ${fps}`;
+    if (now - lastFpsUpdate >= FPS_UPDATE_INTERVAL_MS) {
+        lastFpsUpdate = now;
+        setTextIfChanged(fpsCounter, `FPS: ${Math.round(1000 / elapsed)}`);
+    }
 
     // 清除canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // 更新检测到的手数量
     const handCount = results.multiHandLandmarks?.length || 0;
-    handCountSpan.textContent = handCount;
-
-    // 重置手势置信度显示
-    resetGestureConfidence();
+    if (`${handCount}` !== lastHandCountText) {
+        lastHandCountText = `${handCount}`;
+        setTextIfChanged(handCountSpan, lastHandCountText);
+    }
 
     // 如果检测到手
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
@@ -545,12 +569,16 @@ function onResults(results) {
             }
         }
 
-        // 更新关键点信息
-        updateLandmarksInfo(results.multiHandLandmarks, results.multiHandedness);
+        // 详细调试信息限频刷新，不影响每帧识别与绘制。
+        if (now - lastLandmarksInfoUpdate >= LANDMARKS_UPDATE_INTERVAL_MS) {
+            lastLandmarksInfoUpdate = now;
+            updateLandmarksInfo(results.multiHandLandmarks, results.multiHandedness);
+        }
     } else {
-        landmarksInfo.textContent = "尚未检测到手部";
+        setTextIfChanged(landmarksInfo, "尚未检测到手部");
         currentGesture = "等待手势...";
         gestureConfidence = 0;
+        resetGestureConfidence();
         resetGestureTriggerState();
     }
     
@@ -616,36 +644,29 @@ function isFingerOpen(landmarks, tipIdx, pipIdx) {
 // 更新手势置信度显示
 function updateGestureConfidence(gesture, confidence) {
     const confidencePercent = Math.round(confidence * 100);
-    
-    // 根据识别的手势更新对应的置信度
-    switch(gesture) {
-        case "石头":
-            rockConfidence.textContent = `${confidencePercent}%`;
-            rockCard.classList.add('active');
-            break;
-        case "布":
-            paperConfidence.textContent = `${confidencePercent}%`;
-            paperCard.classList.add('active');
-            break;
-        case "剪刀":
-            scissorsConfidence.textContent = `${confidencePercent}%`;
-            scissorsCard.classList.add('active');
-            break;
-        default:
-            // 未识别，不更新
-            break;
-    }
+    const isRock = gesture === "石头";
+    const isPaper = gesture === "布";
+    const isScissors = gesture === "剪刀";
+
+    // 一次性同步三张卡片，避免每帧先清空再激活导致重复 DOM 写入。
+    setTextIfChanged(rockConfidence, isRock ? `${confidencePercent}%` : "0%");
+    setTextIfChanged(paperConfidence, isPaper ? `${confidencePercent}%` : "0%");
+    setTextIfChanged(scissorsConfidence, isScissors ? `${confidencePercent}%` : "0%");
+
+    setCardActive(rockCard, isRock);
+    setCardActive(paperCard, isPaper);
+    setCardActive(scissorsCard, isScissors);
 }
 
 // 重置手势置信度显示
 function resetGestureConfidence() {
-    rockConfidence.textContent = "0%";
-    paperConfidence.textContent = "0%";
-    scissorsConfidence.textContent = "0%";
+    setTextIfChanged(rockConfidence, "0%");
+    setTextIfChanged(paperConfidence, "0%");
+    setTextIfChanged(scissorsConfidence, "0%");
     
-    rockCard.classList.remove('active');
-    paperCard.classList.remove('active');
-    scissorsCard.classList.remove('active');
+    setCardActive(rockCard, false);
+    setCardActive(paperCard, false);
+    setCardActive(scissorsCard, false);
 }
 
 // 更新手势显示
@@ -669,11 +690,16 @@ function updateGestureDisplay() {
     }
     
     // 更新显示
+    let nextText;
     if (currentGesture !== "等待手势...") {
         const confidencePercent = Math.round(gestureConfidence * 100);
-        gestureDisplay.textContent = `${icon} ${currentGesture} ${confidencePercent}%`;
+        nextText = `${icon} ${currentGesture} ${confidencePercent}%`;
     } else {
-        gestureDisplay.textContent = currentGesture;
+        nextText = currentGesture;
+    }
+    if (nextText !== lastGestureDisplayText) {
+        lastGestureDisplayText = nextText;
+        setTextIfChanged(gestureDisplay, nextText);
     }
 }
 
@@ -712,7 +738,7 @@ function updateLandmarksInfo(multiHandLandmarks, multiHandedness) {
         infoText += '\n';
     }
     
-    landmarksInfo.textContent = infoText || "尚未检测到手部";
+    setTextIfChanged(landmarksInfo, infoText || "尚未检测到手部");
 }
 
 // 根据模型就绪、是否已选设备、是否在运行，更新「启动」按钮

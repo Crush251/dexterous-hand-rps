@@ -16,6 +16,15 @@ const JOINT_SMOOTH = [0.4, 0.4, 0.4, 0.4, 0.4, 0.2, 0.4, 0.4, 0.2, 0.4];
 
 const SEND_INTERVAL_MS = 50;
 const FOLLOW_MIN_CHANGED_VALUE = 2;
+const FPS_UPDATE_INTERVAL_MS = 250;
+const DEBUG_INFO_UPDATE_INTERVAL_MS = 200;
+const JOINT_BARS_UPDATE_INTERVAL_MS = 100;
+
+let lastFpsUpdate = 0;
+let lastDebugInfoUpdate = 0;
+let lastJointBarsUpdate = 0;
+let lastHandCountText = '';
+let lastGestureDisplayText = '';
 
 function toArr(lm) {
     return [lm.x, lm.y, lm.z];
@@ -402,6 +411,12 @@ async function sendFollowBatchCoalesced(devices) {
     }
 }
 
+function setTextIfChanged(element, text) {
+    if (element && element.textContent !== text) {
+        element.textContent = text;
+    }
+}
+
 // ── DOM ─────────────────────────────────────────────────────────────
 const video = document.getElementById('webcam');
 const canvas = document.getElementById('output-canvas');
@@ -534,24 +549,33 @@ function buildFollowDevices(multiHandLandmarks, multiHandedness) {
 function updateJointBarsDisplay(angles) {
     if (!jointBarsEl || !angles) return;
     const names = ['拇屈', '拇展', '食', '中', '无', '小', '食展', '无展', '小展', '拇摆'];
-    jointBarsEl.innerHTML = names
+    const html = names
         .map((name, i) => {
             const pct = Math.round(angles[i]);
             return `<div class="joint-row"><span>${name}</span><div class="joint-bar"><i style="width:${pct}%"></i></div><span>${pct}</span></div>`;
         })
         .join('');
+    if (jointBarsEl.innerHTML !== html) {
+        jointBarsEl.innerHTML = html;
+    }
 }
 
 function onResults(results) {
     const now = performance.now();
     const elapsed = now - lastFrameTime;
     lastFrameTime = now;
-    fpsCounter.textContent = `FPS: ${Math.round(1000 / elapsed)}`;
+    if (now - lastFpsUpdate >= FPS_UPDATE_INTERVAL_MS) {
+        lastFpsUpdate = now;
+        setTextIfChanged(fpsCounter, `FPS: ${Math.round(1000 / elapsed)}`);
+    }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const handCount = results.multiHandLandmarks?.length || 0;
-    handCountSpan.textContent = handCount;
+    if (`${handCount}` !== lastHandCountText) {
+        lastHandCountText = `${handCount}`;
+        setTextIfChanged(handCountSpan, lastHandCountText);
+    }
 
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
         for (let i = 0; i < results.multiHandLandmarks.length; i++) {
@@ -599,7 +623,10 @@ function onResults(results) {
             ctx.fillText(`角度(0-100): ${summary}`, wrist.x * canvas.width, textY);
         }
 
-        updateLandmarksInfo(results.multiHandLandmarks, results.multiHandedness); // 注意：这里可能也需要修改，见下面的补充说明
+        if (now - lastDebugInfoUpdate >= DEBUG_INFO_UPDATE_INTERVAL_MS) {
+            lastDebugInfoUpdate = now;
+            updateLandmarksInfo(results.multiHandLandmarks, results.multiHandedness);
+        }
 
         const t = performance.now();
         if (t - lastFollowSend >= SEND_INTERVAL_MS) {
@@ -610,13 +637,14 @@ function onResults(results) {
             }
         }
     } else {
-        landmarksInfo.textContent = '尚未检测到手部';
+        setTextIfChanged(landmarksInfo, '尚未检测到手部');
         smoothedLeft = null;
         smoothedRight = null;
         queuedFollowDevices = null;
         lastSentFollowDevices = null;
         if (jointBarsEl) jointBarsEl.innerHTML = '';
-        gestureDisplay.textContent = '等待手部…';
+        lastGestureDisplayText = '等待手部…';
+        setTextIfChanged(gestureDisplay, lastGestureDisplayText);
     }
 
     if (results.multiHandLandmarks?.length) {
@@ -624,8 +652,15 @@ function onResults(results) {
         const trueH0Label = getTrueHandLabel(results.multiHandedness[0].label);
         const sm = trueH0Label === 'Left' ? smoothedLeft : smoothedRight;
         if (sm) {
-            updateJointBarsDisplay(sm);
-            gestureDisplay.textContent = `跟随中 · ${trueH0Label === 'Left' ? '左' : '右'}手 10 关节`;
+            if (now - lastJointBarsUpdate >= JOINT_BARS_UPDATE_INTERVAL_MS) {
+                lastJointBarsUpdate = now;
+                updateJointBarsDisplay(sm);
+            }
+            const text = `跟随中 · ${trueH0Label === 'Left' ? '左' : '右'}手 10 关节`;
+            if (text !== lastGestureDisplayText) {
+                lastGestureDisplayText = text;
+                setTextIfChanged(gestureDisplay, text);
+            }
         }
     }
 }
@@ -641,7 +676,7 @@ function updateLandmarksInfo(multiHandLandmarks, multiHandedness) {
         infoText += `手 #${i + 1} (${trueHandLabel === 'Left' ? '左' : '右'}手, ${score})\n`; // 显示真实标签
         infoText += `  10 关节(0-100): ${raw.map((x) => x.toFixed(1)).join(', ')}\n\n`;
     }
-    landmarksInfo.textContent = infoText || '尚未检测到手部';
+    setTextIfChanged(landmarksInfo, infoText || '尚未检测到手部');
 }
 
 function updateStartButtonState() {
@@ -739,10 +774,12 @@ function stopDetection() {
     }
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    handCountSpan.textContent = '0';
-    landmarksInfo.textContent = '尚未检测到手部';
+    lastHandCountText = '0';
+    setTextIfChanged(handCountSpan, lastHandCountText);
+    setTextIfChanged(landmarksInfo, '尚未检测到手部');
     statusDiv.textContent = '检测已停止';
-    gestureDisplay.textContent = '等待手部…';
+    lastGestureDisplayText = '等待手部…';
+    setTextIfChanged(gestureDisplay, lastGestureDisplayText);
     smoothedLeft = null;
     smoothedRight = null;
     queuedFollowDevices = null;
