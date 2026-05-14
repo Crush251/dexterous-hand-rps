@@ -35,7 +35,11 @@
 
                 <!-- 摄像头控制 -->
                 <div class="camera-controls">
-                    <button id="camera-start-btn" class="btn btn-secondary">📷 启动摄像头</button>
+                    <label for="camera-select" class="camera-label">摄像头</label>
+                    <select id="camera-select" class="camera-select" aria-label="选择摄像头">
+                        <option value="">正在加载摄像头列表...</option>
+                    </select>
+                    <button id="camera-start-btn" class="btn btn-secondary" disabled>📷 启动摄像头</button>
                     <button id="camera-stop-btn" class="btn btn-secondary" disabled>📷 停止摄像头</button>
                 </div>
             </div>
@@ -139,7 +143,6 @@
     <!-- 加载 MediaPipe 相关库 -->
     <script src="libs/tensorflow/4.2.0/tf.min.js"></script>
     <script src="libs/mediapipe/hands.js"></script>
-    <script src="libs/mediapipe/camera_utils.js"></script>
     <script src="libs/mediapipe/drawing_utils.js"></script>
     
     <!-- 

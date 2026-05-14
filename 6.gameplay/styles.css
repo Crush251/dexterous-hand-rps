@@ -254,7 +254,25 @@ body {
 
 .camera-controls {
     display: flex;
+    align-items: center;
     gap: 10px;
+    flex-wrap: wrap;
+}
+
+.camera-label {
+    font-weight: 600;
+    color: #1565c0;
+    white-space: nowrap;
+}
+
+.camera-select {
+    min-width: 200px;
+    max-width: min(320px, 100vw);
+    padding: 8px 10px;
+    font-size: 0.95rem;
+    border-radius: 6px;
+    border: 1px solid #90caf9;
+    background: #fff;
 }
 
 /* 主内容区域 */

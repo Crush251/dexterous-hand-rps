@@ -7,12 +7,11 @@
     <link rel="stylesheet" href="styles.css">
     
     <!-- 加载 TensorFlow.js -->
-    <script src="libs/tensorflow/4.2.0/tf.min.js"></script>
+    <script src="../6.gameplay/libs/tensorflow/4.2.0/tf.min.js"></script>
     
     <!-- 加载 MediaPipe Hands 模型 -->
-    <script src="libs/mediapipe/hands.js"></script>
-    <script src="libs/mediapipe/drawing_utils.js"></script>
-    <script src="libs/mediapipe/camera_utils.js"></script>
+    <script src="../6.gameplay/libs/mediapipe/hands.js"></script>
+    <script src="../6.gameplay/libs/mediapipe/drawing_utils.js"></script>
 </head>
 <body>
     <div class="container">
@@ -23,8 +22,12 @@
         <p>灵巧手会分析你的手势并出克制手势</p>
         
         <div id="status">正在加载模型...</div>
-        
+
         <div class="controls">
+            <label for="camera-select" class="camera-label">摄像头</label>
+            <select id="camera-select" aria-label="选择摄像头">
+                <option value="">正在加载摄像头列表...</option>
+            </select>
             <button id="start-btn" disabled>启动摄像头</button>
             <button id="stop-btn" disabled>停止</button>
         </div>

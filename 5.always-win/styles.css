@@ -175,6 +175,24 @@ h1 {
 
 .controls {
     margin: 20px 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+}
+
+.camera-label {
+    font-weight: 600;
+    color: #2c3e50;
+}
+
+#camera-select {
+    min-width: 220px;
+    padding: 8px 10px;
+    font-size: 15px;
+    border-radius: 5px;
+    border: 1px solid #bdc3c7;
+    background: #fff;
 }
 
 button {

@@ -42,6 +42,25 @@ const GesturePresets = {
         SCISSORS: {
             finger: [1,65,180,255,255,25,25]
         }
+    },
+    // L25 型号（base64 编码的帧序列，每帧解码后为一条 CAN 数据）
+    'L25': {
+        ROCK: {
+            frames: [
+                "AaAAAAAA", "Av+jgVY+", "A4xB////", "BqaK////",
+                "AYAAAAAA", "Av+AgICA", "A7sNAAUP", "Bm4MDAIJ"
+            ]
+        },
+        PAPER: {
+            frames: [
+                "AYAAAAAA", "Av+jgVY+", "A///////", "Bv//////"
+            ]
+        },
+        SCISSORS: {
+            frames: [
+                "AYAAAAAA", "Av/LgYCA", "A7v//wUP", "Bm7//wIJ"
+            ]
+        }
     }
 };
 
@@ -67,7 +86,7 @@ function parseBaseUrl(url) {
 // 获取设备配置信息（页面加载时调用一次）
 async function loadDeviceConfig() {
     try {
-        const response = await fetch(`${baseHost}/api/hand/handsconfig`, {
+        const response = await fetch(`${baseHost}/api/hand/devices`, {
             method: 'GET',
             headers: { 'Content-Type': 'application/json' },
         });
@@ -83,7 +102,7 @@ async function loadDeviceConfig() {
                 
                 return {
                     interface: config.interface || 'can0',
-                    model: model, // L10 / L6 / O6 / O7 / O6/L6
+                    model: model, // L10  / O7 / O6/L6
                     variant: config.variant || '', // 仅 L10 有此字段：worm_gear 或 ball_joint
                     side: config.side || 'right' // left / right
                 };
@@ -111,27 +130,30 @@ async function loadDeviceConfig() {
     }
 }
 
-// 发送 CAN 消息到指定端口
-async function sendCanMessage(canMessage) {
-    const canServerUrl = "http://localhost:5260/api/can";
+// 批量发送 CAN 消息到后端（按型号分组，后端使用二级协程处理）
+async function sendBatchCanMessages(modelsData) {
+    const backendUrl = `${batchHost}/api/gesture/batch`;
     
     try {
-        const response = await fetch(canServerUrl, {
+        const response = await fetch(backendUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(canMessage)
+            body: JSON.stringify({ models: modelsData })
         });
 
         const data = await response.json();
-        if (data.status === 'success' || response.ok) {
-            console.log(`CAN 消息发送成功:`, canMessage);
-            return true;
+        if (data.status === 'ok') {
+            console.log(`批量 CAN 消息发送完成: 成功 ${data.success}, 失败 ${data.failed}`);
+            if (data.errors && data.errors.length > 0) {
+                console.warn('部分消息发送失败:', data.errors);
+            }
+            return data.success > 0;
         } else {
-            console.error(`CAN 消息发送失败:`, data.error || data.message);
+            console.error(`批量 CAN 消息发送失败:`, data.message || '未知错误');
             return false;
         }
     } catch (error) {
-        console.error(`CAN 消息请求错误:`, error);
+        console.error(`批量 CAN 消息请求错误:`, error);
         return false;
     }
 }
@@ -145,8 +167,12 @@ function getGesturePresetKey(config) {
     
     const { model, variant } = config;
     
+    // L25 型号
+    if (model === 'L25') {
+        return 'L25';
+    }
     // L10 型号根据 variant 区分
-    if (model === 'L10') {
+    else if (model === 'L10') {
         if (variant === 'worm_gear') {
             return 'L10_worm_gear';
         } else if (variant === 'ball_joint') {
@@ -174,7 +200,7 @@ function getCanId(side) {
     return side === 'left' ? 0x28 : 0x27;
 }
 
-// 封装调用函数 - 并发发送所有设备的 CAN 消息
+// 封装调用函数 - 批量发送所有设备的 CAN 消息到后端（按型号分组，后端使用二级协程处理）
 async function performGesture(gesture) {
     // 检查设备配置是否已加载
     if (!deviceConfig || !Array.isArray(deviceConfig) || deviceConfig.length === 0) {
@@ -182,18 +208,21 @@ async function performGesture(gesture) {
         return;
     }
     
-    console.log(`开始执行手势 ${gesture}，共 ${deviceConfig.length} 个设备（并发发送）`);
+    console.log(`开始执行手势 ${gesture}，共 ${deviceConfig.length} 个设备（按型号分组发送到后端）`);
     
-    // 为每个设备创建发送任务，并发执行
-    const sendTasks = deviceConfig.map(async (config, index) => {
+    // 按型号分组组织数据
+    const modelsData = {};
+    
+    for (let index = 0; index < deviceConfig.length; index++) {
+        const config = deviceConfig[index];
+        
         try {
-            // 获取对应型号的手势预设键
             const presetKey = getGesturePresetKey(config);
             const modelPresets = GesturePresets[presetKey];
             
             if (!modelPresets) {
                 console.error(`设备 ${index + 1} (${config.interface}): 未找到对应型号的手势预设:`, presetKey);
-                return;
+                continue;
             }
             
             // 获取具体的手势预设（ROCK、PAPER 或 SCISSORS）
@@ -201,43 +230,53 @@ async function performGesture(gesture) {
             
             if (!preset) {
                 console.error(`设备 ${index + 1} (${config.interface}): 无效的手势:`, gesture);
-                return;
+                continue;
             }
             
-            const fingerpose = preset.finger;
+            // 使用 presetKey 作为型号标识（如 'L10_worm_gear', 'O6/L6', 'L25'）
+            if (!modelsData[presetKey]) {
+                modelsData[presetKey] = {
+                    interface: [],
+                    id: [],
+                    data: []
+                };
+            }
             
-            // 构建 finger CAN 消息
-            const fingerCanMessage = {
-                interface: config.interface,
-                id: getCanId(config.side),
-                data: fingerpose
-            };
+            // 添加接口和ID
+            modelsData[presetKey].interface.push(config.interface);
+            modelsData[presetKey].id.push(getCanId(config.side));
+            
+            // 收集数据，每种型号只需填充一次 data
+            if (modelsData[presetKey].data.length === 0) {
+                if (preset.frames) {
+                    // L25 等使用 frames 字段：base64 字符串数组，解码为 [[int...], ...]
+                    for (const b64 of preset.frames) {
+                        const bytes = Array.from(atob(b64), c => c.charCodeAt(0));
+                        modelsData[presetKey].data.push(bytes);
+                    }
+                } else {
+                    // 其他型号使用 finger / palm 字段
+                    modelsData[presetKey].data.push(preset.finger);
+                    if (preset.palm) {
+                        modelsData[presetKey].data.push(preset.palm);
+                    }
+                }
+            }
             
             console.log(`设备 ${index + 1} (${config.interface}, ${config.side}手): 使用 ${presetKey} 配置执行手势 ${gesture}`);
-            
-            // 发送 finger 消息
-            await sendCanMessage(fingerCanMessage);
-            
-            // 如果有 palm 数据，延迟后发送
-            if (preset.palm) {
-                const palmCanMessage = {
-                    interface: config.interface,
-                    id: getCanId(config.side),
-                    data: preset.palm
-                };
-                // 短暂延迟后发送手掌姿势
-                await new Promise(resolve => setTimeout(resolve, 10));
-                await sendCanMessage(palmCanMessage);
-            }
         } catch (error) {
-            console.error(`设备 ${index + 1} (${config.interface}): 发送失败`, error);
+            console.error(`设备 ${index + 1} (${config.interface}): 准备消息失败`, error);
         }
-    });
+    }
     
-    // 并发执行所有设备的发送任务
-    await Promise.all(sendTasks);
-    
-    console.log(`手势 ${gesture} 执行完成（所有设备并发发送完成）`);
+    // 批量发送所有消息到后端（按型号分组）
+    if (Object.keys(modelsData).length > 0) {
+        await sendBatchCanMessages(modelsData);
+        const totalInterfaces = Object.values(modelsData).reduce((sum, model) => sum + model.interface.length, 0);
+        console.log(`手势 ${gesture} 执行完成（已按型号分组发送，共 ${Object.keys(modelsData).length} 个型号，${totalInterfaces} 个接口）`);
+    } else {
+        console.warn(`手势 ${gesture} 没有可发送的消息`);
+    }
 }
 
 // 页面元素
@@ -247,6 +286,7 @@ const ctx = canvas.getContext('2d');
 const statusDiv = document.getElementById('status');
 const cameraStartButton = document.getElementById('camera-start-btn');
 const cameraStopButton = document.getElementById('camera-stop-btn');
+const cameraSelect = document.getElementById('camera-select');
 const handCountSpan = document.getElementById('hand-count');
 const landmarksInfo = document.getElementById('landmarks-info');
 const fpsCounter = document.getElementById('fps');
@@ -287,13 +327,18 @@ const scissorsCard = document.getElementById('scissors-card');
 
 // 全局变量
 let hands;
-let camera;
+/** 手部模型是否已加载完成 */
+let handModelReady = false;
+/** MediaPipe 送检循环（避免 Camera 类二次 getUserMedia） */
+let videoFrameRafId = null;
+let isHandDetectionLooping = false;
 let lastFrameTime = 0;
 let isCameraRunning = false;
 let currentGesture = "未识别";
 let gestureConfidence = 0;
 let deviceConfig = null; // 存储设备配置信息
-let baseHost = "http://localhost:1217";
+let baseHost = "http://localhost:7080";
+let batchHost = "http://localhost:8899";
 
 // 游戏状态变量
 let gameState = 'idle'; // idle, countdown, waiting, judging, paused
@@ -362,6 +407,15 @@ function setupEventListeners() {
     gameStopButton.addEventListener('click', stopGame);
     cameraStartButton.addEventListener('click', startCamera);
     cameraStopButton.addEventListener('click', stopCamera);
+    if (cameraSelect) {
+        cameraSelect.addEventListener('change', updateCameraStartButtonState);
+    }
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+        navigator.mediaDevices.addEventListener('devicechange', () => {
+            const keepId = cameraSelect ? cameraSelect.value : '';
+            loadCameraDevices(keepId).catch((e) => console.warn('devicechange 刷新列表失败:', e));
+        });
+    }
 }
 
 // 开始游戏
@@ -667,6 +721,7 @@ function setupCanvas() {
 // 初始化MediaPipe Hands模型
 async function initHandDetection() {
     try {
+        handModelReady = false;
         statusDiv.textContent = "正在加载手部检测模型...";
         
         hands = new Hands({
@@ -686,12 +741,15 @@ async function initHandDetection() {
         // 设置结果回调
         hands.onResults(onResults);
 
-        statusDiv.textContent = "模型加载完成，点击'启动摄像头'开始检测";
-        cameraStartButton.disabled = false;
+        handModelReady = true;
+        statusDiv.textContent = "模型加载完成，请选择摄像头后点击「启动摄像头」";
+        updateCameraStartButtonState();
 
     } catch (error) {
+        handModelReady = false;
         statusDiv.textContent = `初始化失败: ${error.message}`;
         console.error("初始化失败:", error);
+        updateCameraStartButtonState();
     }
 }
 
@@ -892,55 +950,99 @@ function updateLandmarksInfo(multiHandLandmarks, multiHandedness) {
     landmarksInfo.textContent = infoText || "尚未检测到手部";
 }
 
+/** 模型就绪且已选设备且摄像头未在运行时，才可点「启动摄像头」 */
+function updateCameraStartButtonState() {
+    const selected = cameraSelect && cameraSelect.value;
+    const canStart = Boolean(handModelReady && selected && !isCameraRunning);
+    cameraStartButton.disabled = !canStart;
+}
+
 // 启动摄像头
 async function startCamera() {
+    const selectedDeviceId = cameraSelect ? cameraSelect.value : '';
+    if (!selectedDeviceId) {
+        statusDiv.textContent = "请先在下拉框中选择摄像头";
+        return;
+    }
+    if (!handModelReady || !hands) {
+        statusDiv.textContent = "模型尚未就绪，请稍候";
+        return;
+    }
+
     try {
         statusDiv.textContent = "正在启动摄像头...";
         
         const constraints = {
             video: {
-                width: 640,
-                height: 480
-            }
+                deviceId: { exact: selectedDeviceId },
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+            },
         };
         
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         video.srcObject = stream;
         
-        video.onloadedmetadata = () => {
-            setupCanvas();
-            startDetection();
-        };
+        video.addEventListener(
+            "loadedmetadata",
+            async () => {
+                setupCanvas();
+                try {
+                    await loadCameraDevices(selectedDeviceId);
+                } catch (e) {
+                    console.warn("刷新摄像头列表失败:", e);
+                }
+                startDetection();
+            },
+            { once: true }
+        );
         
         cameraStartButton.disabled = true;
         cameraStopButton.disabled = false;
         isCameraRunning = true;
+        if (cameraSelect) {
+            cameraSelect.disabled = true;
+        }
         
     } catch (error) {
         statusDiv.textContent = `摄像头启动失败: ${error.message}`;
         console.error("摄像头启动失败:", error);
+        updateCameraStartButtonState();
     }
 }
 
 // 开始检测
 function startDetection() {
+    if (isHandDetectionLooping) {
+        return;
+    }
+    isHandDetectionLooping = true;
     statusDiv.textContent = "正在检测手部...";
     
-    camera = new Camera(video, {
-        onFrame: async () => {
-            await hands.send({image: video});
-        },
-        width: 640,
-        height: 480
-    });
-    
-    camera.start();
+    const loop = () => {
+        if (!isHandDetectionLooping) {
+            return;
+        }
+        Promise.resolve(hands.send({ image: video }))
+            .then(() => {
+                videoFrameRafId = requestAnimationFrame(loop);
+            })
+            .catch((err) => {
+                console.error("hands.send 失败:", err);
+                statusDiv.textContent = `检测中断: ${err.message}`;
+                stopCamera();
+            });
+    };
+    videoFrameRafId = requestAnimationFrame(loop);
 }
 
 // 停止摄像头
 function stopCamera() {
-    if (camera) {
-        camera.stop();
+    isHandDetectionLooping = false;
+
+    if (videoFrameRafId != null) {
+        cancelAnimationFrame(videoFrameRafId);
+        videoFrameRafId = null;
     }
     
     if (video.srcObject) {
@@ -956,9 +1058,12 @@ function stopCamera() {
     currentGestureSpan.textContent = "等待手势...";
     resetGestureConfidence();
     
-    cameraStartButton.disabled = false;
     cameraStopButton.disabled = true;
     isCameraRunning = false;
+    if (cameraSelect) {
+        cameraSelect.disabled = false;
+    }
+    updateCameraStartButtonState();
     
     // 如果游戏正在进行，停止游戏
     if (gameState !== 'idle') {
@@ -1010,8 +1115,70 @@ function drawLandmarks(ctx, landmarks, options) {
 window.addEventListener('load', async () => {
     // 首先加载设备配置信息（只加载一次）
     await loadDeviceConfig();
+
+    await loadCameraDevices();
     
     // 然后初始化手部检测模型和游戏
     initHandDetection();
     initGame();
-}); 
+});
+
+/**
+ * 枚举视频输入设备填充下拉框（未授权时可能没有设备名称）
+ * @param {string} [preferredDeviceId]
+ */
+async function loadCameraDevices(preferredDeviceId) {
+    if (!cameraSelect) {
+        return;
+    }
+
+    const previousId =
+        preferredDeviceId !== undefined ? preferredDeviceId : cameraSelect.value;
+
+    const appendPlaceholder = () => {
+        const ph = document.createElement("option");
+        ph.value = "";
+        ph.textContent = "请选择摄像头";
+        cameraSelect.appendChild(ph);
+    };
+
+    try {
+        cameraSelect.innerHTML = "";
+        appendPlaceholder();
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cameras = devices.filter((d) => d.kind === "videoinput");
+
+        if (cameras.length === 0) {
+            cameraSelect.innerHTML = "";
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "未检测到摄像头";
+            cameraSelect.appendChild(option);
+            updateCameraStartButtonState();
+            return;
+        }
+
+        cameras.forEach((cam, index) => {
+            const option = document.createElement("option");
+            option.value = cam.deviceId;
+            option.textContent = cam.label || `摄像头 ${index + 1}`;
+            cameraSelect.appendChild(option);
+        });
+
+        const ids = new Set([...cameraSelect.options].map((o) => o.value));
+        if (previousId && ids.has(previousId)) {
+            cameraSelect.value = previousId;
+        }
+
+        updateCameraStartButtonState();
+    } catch (error) {
+        console.error("加载摄像头列表失败:", error);
+        cameraSelect.innerHTML = "";
+        const errOpt = document.createElement("option");
+        errOpt.value = "";
+        errOpt.textContent = "摄像头列表加载失败";
+        cameraSelect.appendChild(errOpt);
+        updateCameraStartButtonState();
+    }
+} 
